@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Touchless Music & SFX Trigger · Class C</title>
+<style>
+  body{ font-family:system-ui,-apple-system,sans-serif; margin:0; background:#0f1115; color:#eee;
+        min-height:100vh; display:flex; flex-direction:column; align-items:center; gap:14px; padding:22px; text-align:center; }
+  h1{ margin:6px 0 0; font-size:26px; }
+  p.note{ margin:0; opacity:.75; font-size:14px; max-width:520px; line-height:1.55; }
+  button{ font-size:17px; padding:11px 22px; border:0; border-radius:12px; background:#FF4A1C; color:#fff; font-weight:700; cursor:pointer; }
+  button:disabled{ opacity:.5; cursor:default; }
+  #cam canvas{ border-radius:12px; }
+  #label{ font-family:ui-monospace,monospace; font-size:13px; opacity:.8; min-height:18px; }
+  #stage{ width:min(92vw,520px); min-height:220px; border-radius:16px; border:1px solid #23262e;
+          display:grid; place-items:center; padding:20px; overflow:hidden; transition:background .12s ease; }
+  #stage .big{ font-size:42px; font-weight:800; color:#fff; line-height:1.1; }
+  .hint{ opacity:.4; }
+  [hidden]{ display:none!important; }
+</style>
+</head>
+<body>
+  <h1>🎧 Touchless Music & SFX Trigger</h1>
+  <p class="note">Klik Start Camera dan berikan akses webcam. Tunjukkan pose gesture tangan untuk memicu efek suara!</p>
+  <button id="startBtn">▶ Start Camera</button>
+  <div id="cam"></div>
+  <div id="label">not running yet</div>
+  <div id="stage">
+    <span class="hint">IDLE (Standby)</span>
+    <div class="big" id="big" hidden></div>
+  </div>
+
+  <!-- Audio Elements -->
+  <audio id="audio-drum" src="https://actions.google.com/sounds/v1/percussion/drum_roll.ogg"></audio>
+  <audio id="audio-guitar" src="https://actions.google.com/sounds/v1/ambiences/acoustic_guitar.ogg"></audio>
+  <audio id="audio-bass" src="https://actions.google.com/sounds/v1/science_fiction/low_laser.ogg"></audio>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+  <script>
+  /* =========== MODEL TEACHABLE MACHINE =========== */
+  const MODEL = "https://teachablemachine.withgoogle.com/models/E8AL84Plw/";
+  const THRESHOLD = 0.90; // Sesuai instruksi Slide 5 (>= 0.9)
+  let model, webcam, currentSound = "", audioCtx = null;
+  const stage = document.getElementById("stage"), big = document.getElementById("big"), hint = stage.querySelector(".hint");
+
+  function initAudioContext() {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+    } catch(e){}
+  }
+
+  function playSynthSound(freq, duration) {
+    try {
+      initAudioContext();
+      const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+      osc.type = "sine"; osc.frequency.value = freq;
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+      osc.start(); osc.stop(audioCtx.currentTime + duration + 0.01);
+    } catch(e) {}
+  }
+
+  function playSound(type) {
+    stopAllAudio();
+    initAudioContext();
+    let audio = document.getElementById("audio-" + type);
+    if (audio) {
+      audio.currentTime = 0;
+      audio.play().then(() => {}).catch(e => {
+        if (type === "drum") playSynthSound(300, 0.4);
+        else if (type === "guitar") playSynthSound(523, 0.5);
+        else if (type === "bass") playSynthSound(150, 0.6);
+      });
+    } else {
+      if (type === "drum") playSynthSound(300, 0.4);
+      else if (type === "guitar") playSynthSound(523, 0.5);
+      else if (type === "bass") playSynthSound(150, 0.6);
+    }
+  }
+
+  function stopAllAudio() {
+    document.querySelectorAll("audio").forEach(a => { a.pause(); a.currentTime = 0; });
+  }
+
+  function setTrigger(labelText, soundType){
+    if(!labelText){ 
+      stage.style.background = ""; 
+      hint.hidden = false; 
+      hint.textContent = "IDLE (Standby)";
+      big.hidden = true; 
+      stopAllAudio();
+      currentSound = "";
+      return; 
+    }
+    hint.hidden = true; 
+    stage.style.background = "#FF4A1C";
+    big.hidden = false; 
+    big.textContent = labelText;
+    
+    if (soundType && soundType !== currentSound) {
+      currentSound = soundType;
+      playSound(soundType);
+    }
+  }
+
+  document.getElementById("startBtn").onclick = start;
+  async function start(){
+    initAudioContext();
+    document.getElementById("label").textContent = "loading model...";
+    model = await tmImage.load(MODEL + "model.json", MODEL + "metadata.json");
+    webcam = new tmImage.Webcam(200, 200, true); 
+    await webcam.setup(); 
+    await webcam.play();
+    document.getElementById("cam").appendChild(webcam.canvas);
+    document.getElementById("startBtn").disabled = true;
+    document.getElementById("label").textContent = "running! tunjukkan pose gesture ke kamera.";
+    requestAnimationFrame(loop);
+  }
+
+  async function loop(){ 
+    webcam.update(); 
+    await predict(); 
+    requestAnimationFrame(loop); 
+  }
+
+  async function predict(){
+    const preds = await model.predict(webcam.canvas);
+    let top = preds[0]; 
+    for(const p of preds) { if(p.probability > top.probability) top = p; }
+    
+    document.getElementById("label").textContent = top.className + " - " + (top.probability * 100).toFixed(0) + "%";
+    
+    const className = top.className.toLowerCase().trim();
+    
+    if(top.probability >= THRESHOLD){
+      // 1. Drum
+      if (className.includes("drum") || className.includes("drum") || className.includes("1 jari")) {
+        setTrigger("DRUM LOOP 🥁", "drum");
+      } 
+      // 2. Jika pose Metal (Bass 100% kepastian tinggi & posisi tangan mendekat) -> BASS DROP
+      else if (className === "bass" && top.probability > 0.98) {
+        setTrigger("BASS DROP / SFX 🎵", "bass");
+      } 
+      // 3. Jika pose 2 Jari (Bass kepastian 90-97%) -> GUITAR CHORD
+      else if (className === "guitar" || className.includes("2 jari") || className.includes("guitar")) {
+        setTrigger("GUITAR CHORD 🎸", "guitar");
+      } 
+      else {
+        setTrigger(null, null);
+      }
+    } else {
+      setTrigger(null, null);
+    }
+  }
+  </script>
+</body>
+</html>
